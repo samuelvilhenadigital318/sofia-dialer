@@ -275,37 +275,20 @@ function onSIPMessage(raw) {
         ws.send('ACK sip:'+dn+'@'+CONFIG.host+' SIP/2.0\r\nVia: SIP/2.0/WSS '+CONFIG.host+';branch='+br+'\r\nMax-Forwards: 70\r\nFrom: <sip:'+CONFIG.user+'@'+CONFIG.host+'>;tag='+localTag+'\r\nTo: '+toHeader+(toTag?';tag='+toTag:'')+'\r\nCall-ID: '+callId+'\r\nCSeq: '+cseq+' ACK\r\nContent-Length: 0\r\n\r\n');
         state='answered';
 
-        // Calcular tempo de atendimento
-        const tempoAtendimento = callStartTime ? (Date.now() - callStartTime) / 1000 : 999;
-        const caixaPostal = tempoAtendimento < 8;
+        output({ status: 'answered', callId, destination: CONFIG.destination });
 
-        output({
-          status: caixaPostal ? 'caixa_postal' : 'answered',
-          callId, destination: CONFIG.destination,
-          tempoAtendimento: Math.round(tempoAtendimento)
-        });
+        // Transferir para Maria via REFER
+        log('Transferindo para Maria via REFER...');
+        setTimeout(() => {
+          ws.send(buildREFER(toHeader, toTag, CONFIG.ramalMaria));
+        }, 500);
 
-        if (!caixaPostal) {
-          // Transferir para Maria via REFER
-          log('Transferindo para Maria via REFER...');
-          setTimeout(() => {
-            ws.send(buildREFER(toHeader, toTag, CONFIG.ramalMaria));
-          }, 500);
-
-          // Aguardar NOTIFY de sucesso ou timeout de 10s
-          setTimeout(() => {
-            log('Encerrando apos transferencia...');
-            ws.close();
-            process.exit(0);
-          }, 10000);
-        } else {
-          // Caixa postal - desligar
-          log('Caixa postal detectada, desligando...');
-          cseq++;
-          const bb=generateBranch();
-          ws.send('BYE sip:'+dn+'@'+CONFIG.host+' SIP/2.0\r\nVia: SIP/2.0/WSS '+CONFIG.host+';branch='+bb+'\r\nMax-Forwards: 70\r\nFrom: <sip:'+CONFIG.user+'@'+CONFIG.host+'>;tag='+localTag+'\r\nTo: '+toHeader+(toTag?';tag='+toTag:'')+'\r\nCall-ID: '+callId+'\r\nCSeq: '+cseq+' BYE\r\nContent-Length: 0\r\n\r\n');
-          setTimeout(() => { ws.close(); process.exit(0); }, 2000);
-        }
+        // Encerrar apos 10s
+        setTimeout(() => {
+          log('Encerrando apos transferencia...');
+          ws.close();
+          process.exit(0);
+        }, 10000);
         return;
       }
       if (msg.code===401||msg.code===407) {

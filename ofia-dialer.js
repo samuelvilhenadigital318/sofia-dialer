@@ -256,12 +256,16 @@ function onSIPMessage(raw) {
 
   if (state === 'calling') {
     if (msg.type==='response') {
-      if (msg.code>=100 && msg.code<200) { log('Provisional: '+msg.code); return; }
+      if (msg.code>=100 && msg.code<200) {
+        log('Provisional: '+msg.code);
+        if (msg.code === 183 || msg.code === 180) callStartTime = Date.now();
+        return;
+      }
       if (msg.code===200) {
         const tf=msg.headers['to']||'';
         const tm=tf.match(/;tag=([^\s;]+)/);
         toTag=tm?tm[1]:''; toHeader=tf.split(';tag=')[0];
-        callStartTime = Date.now();
+        // tempo medido desde o 183 (já definido antes)
         clearTimeout(answerTimer); callAnswered=true;
         log('ATENDIDA! Enviando ACK...');
 
@@ -272,7 +276,7 @@ function onSIPMessage(raw) {
         state='answered';
 
         // Calcular tempo de atendimento
-        const tempoAtendimento = (Date.now() - callStartTime) / 1000;
+        const tempoAtendimento = callStartTime ? (Date.now() - callStartTime) / 1000 : 999;
         const caixaPostal = tempoAtendimento < 8;
 
         output({

@@ -1,10 +1,8 @@
 /**
- * Sofia SIP Dialer v3 — SuperCotação / Grupo Sandri
- * 
- * Quando o lead atende, faz REFER para transferir direto para o ramal da Maria
- * sem desligar a chamada original.
+ * Sofia SIP Dialer v4 — SuperCotação
+ * Liga para o lead, detecta atendimento, desliga imediatamente.
+ * O click-to-call para a Maria é feito PELO N8N após receber "answered".
  */
-
 'use strict';
 
 const crypto = require('crypto');
@@ -16,10 +14,8 @@ const CONFIG = {
   host:          'app.nvoip.com.br',
   port:          7443,
   realm:         'app.nvoip.com.br',
-  callerId:      '+554720190290',
   destination:   process.argv[2] || null,
-  ramalMaria:    process.argv[3] || '146482001',
-  answerTimeout: parseInt(process.argv[4] || '25', 10),
+  answerTimeout: parseInt(process.argv[3] || '25', 10),
 };
 
 if (!CONFIG.destination) {
@@ -28,9 +24,8 @@ if (!CONFIG.destination) {
 }
 
 function output(obj) { process.stdout.write(JSON.stringify(obj) + '\n'); }
-function log(msg)    { process.stderr.write('[Sofia v3] ' + msg + '\n'); }
+function log(msg)    { process.stderr.write('[Sofia v4] ' + msg + '\n'); }
 function md5(s)      { return crypto.createHash('md5').update(s).digest('hex'); }
-
 function generateCallId()  { return crypto.randomBytes(12).toString('hex') + '@' + CONFIG.host; }
 function generateTag()     { return crypto.randomBytes(8).toString('hex'); }
 function generateBranch()  { return 'z9hG4bK' + crypto.randomBytes(8).toString('hex'); }
@@ -54,7 +49,6 @@ function parseWWWAuth(header) {
 
 let cseq = 1, callId = generateCallId(), localTag = generateTag(), branch = generateBranch();
 let callAnswered = false, answerTimer = null;
-let callStartTime = null;
 
 class SIPWebSocket {
   constructor(host, port) {
@@ -74,15 +68,10 @@ class SIPWebSocket {
     this.socket.on('secureConnect', () => {
       log('TLS OK');
       this.socket.write([
-        'GET / HTTP/1.1',
-        'Host: ' + this.host + ':' + this.port,
-        'Upgrade: websocket',
-        'Connection: Upgrade',
-        'Sec-WebSocket-Key: ' + this._wsKey,
-        'Sec-WebSocket-Version: 13',
-        'Sec-WebSocket-Protocol: sip',
-        'Origin: https://' + this.host,
-        '\r\n',
+        'GET / HTTP/1.1', 'Host: ' + this.host + ':' + this.port,
+        'Upgrade: websocket', 'Connection: Upgrade',
+        'Sec-WebSocket-Key: ' + this._wsKey, 'Sec-WebSocket-Version: 13',
+        'Sec-WebSocket-Protocol: sip', 'Origin: https://' + this.host, '\r\n',
       ].join('\r\n'));
     });
     this.socket.on('data', (data) => {
@@ -93,15 +82,14 @@ class SIPWebSocket {
         const header = this._httpBuffer.substring(0, end);
         const rest = this._httpBuffer.substring(end + 4);
         if (header.includes('101 Switching')) {
-          log('WS OK');
-          this._upgraded = true;
+          log('WS OK'); this._upgraded = true;
           if (rest.length > 0) {
             this._frameBuffer = Buffer.concat([this._frameBuffer, Buffer.from(rest, 'binary')]);
             this._processFrames();
           }
           if (this.onopen) this.onopen();
         } else {
-          if (this.onerror) this.onerror(new Error('WS falhou: ' + header.substring(0, 80)));
+          if (this.onerror) this.onerror(new Error('WS falhou'));
         }
         return;
       }
@@ -129,7 +117,7 @@ class SIPWebSocket {
       } else payload = this._frameBuffer.slice(off, off+len);
       this._frameBuffer = this._frameBuffer.slice(off+len);
       if (op === 1 || op === 0) { if (this.onmessage) this.onmessage(payload.toString('utf8')); }
-      else if (op === 8) { log('Close frame'); if (this.onclose) this.onclose(); }
+      else if (op === 8) { if (this.onclose) this.onclose(); }
       else if (op === 9) { this.socket.write(Buffer.from([0x8A, 0x00])); }
     }
   }
@@ -155,12 +143,9 @@ function buildREG(auth='') {
     'Max-Forwards: 70',
     'From: <sip:' + CONFIG.user + '@' + CONFIG.host + '>;tag=' + localTag,
     'To: <sip:' + CONFIG.user + '@' + CONFIG.host + '>',
-    'Call-ID: ' + callId,
-    'CSeq: ' + cseq + ' REGISTER',
+    'Call-ID: ' + callId, 'CSeq: ' + cseq + ' REGISTER',
     'Contact: <sip:' + CONFIG.user + '@' + CONFIG.host + ';transport=wss>',
-    'Expires: 60',
-    'User-Agent: Sofia-SDR/1.0',
-    'Content-Length: 0',
+    'Expires: 60', 'User-Agent: Sofia-SDR/1.0', 'Content-Length: 0',
   ];
   if (auth) lines.splice(7, 0, auth);
   return lines.join('\r\n') + '\r\n\r\n';
@@ -175,35 +160,13 @@ function buildINVITE(dest, sdp, auth='') {
     'Via: SIP/2.0/WSS ' + CONFIG.host + ';branch=' + branch + ';rport',
     'Max-Forwards: 70',
     'From: <sip:' + CONFIG.user + '@' + CONFIG.host + '>;tag=' + localTag,
-    'To: <' + toUri + '>',
-    'Call-ID: ' + callId,
-    'CSeq: ' + cseq + ' INVITE',
+    'To: <' + toUri + '>', 'Call-ID: ' + callId, 'CSeq: ' + cseq + ' INVITE',
     'Contact: <sip:' + CONFIG.user + '@' + CONFIG.host + ';transport=wss>',
-    'Content-Type: application/sdp',
-    'User-Agent: Sofia-SDR/1.0',
+    'Content-Type: application/sdp', 'User-Agent: Sofia-SDR/1.0',
     'Content-Length: ' + Buffer.byteLength(sdp),
   ];
   if (auth) lines.splice(9, 0, auth);
   return lines.join('\r\n') + '\r\n\r\n' + sdp;
-}
-
-function buildREFER(toHeader, toTag, referTo) {
-  // REFER transfere a chamada para o ramal da Maria
-  const dn = CONFIG.destination.replace(/\D/g,'');
-  const br = generateBranch();
-  cseq++;
-  return [
-    'REFER sip:' + dn + '@' + CONFIG.host + ' SIP/2.0',
-    'Via: SIP/2.0/WSS ' + CONFIG.host + ';branch=' + br,
-    'Max-Forwards: 70',
-    'From: <sip:' + CONFIG.user + '@' + CONFIG.host + '>;tag=' + localTag,
-    'To: ' + toHeader + (toTag ? ';tag=' + toTag : ''),
-    'Call-ID: ' + callId,
-    'CSeq: ' + cseq + ' REFER',
-    'Refer-To: <sip:' + referTo + '@' + CONFIG.host + '>',
-    'Referred-By: <sip:' + CONFIG.user + '@' + CONFIG.host + '>',
-    'Content-Length: 0',
-  ].join('\r\n') + '\r\n\r\n';
 }
 
 function buildSDP() {
@@ -230,6 +193,20 @@ function parseSIP(msg) {
 
 let ws, state='idle', toHeader='', toTag='';
 
+function sendBYE() {
+  const dn = CONFIG.destination.replace(/\D/g,'');
+  cseq++;
+  const br = generateBranch();
+  ws.send('BYE sip:' + dn + '@' + CONFIG.host + ' SIP/2.0\r\n' +
+    'Via: SIP/2.0/WSS ' + CONFIG.host + ';branch=' + br + '\r\n' +
+    'Max-Forwards: 70\r\n' +
+    'From: <sip:' + CONFIG.user + '@' + CONFIG.host + '>;tag=' + localTag + '\r\n' +
+    'To: ' + toHeader + (toTag ? ';tag=' + toTag : '') + '\r\n' +
+    'Call-ID: ' + callId + '\r\n' +
+    'CSeq: ' + cseq + ' BYE\r\n' +
+    'Content-Length: 0\r\n\r\n');
+}
+
 function onSIPMessage(raw) {
   log('<< ' + raw.split('\r\n')[0]);
   const msg = parseSIP(raw);
@@ -246,7 +223,6 @@ function onSIPMessage(raw) {
       let ah='Authorization: Digest username="'+CONFIG.user+'",realm="'+(a.realm||CONFIG.realm)+'",nonce="'+a.nonce+'",uri="sip:'+CONFIG.host+'",response="'+resp+'"';
       if (a.qop) ah+=',qop=auth,nc='+nc+',cnonce="'+cn+'"';
       if (a.algorithm) ah+=',algorithm='+a.algorithm;
-      if (a.opaque) ah+=',opaque="'+a.opaque+'"';
       cseq++; branch=generateBranch();
       ws.send(buildREG(ah)); return;
     }
@@ -256,39 +232,39 @@ function onSIPMessage(raw) {
 
   if (state === 'calling') {
     if (msg.type==='response') {
-      if (msg.code>=100 && msg.code<200) {
-        log('Provisional: '+msg.code);
-        if (msg.code === 183 || msg.code === 180) callStartTime = Date.now();
-        return;
-      }
+      if (msg.code>=100 && msg.code<200) { log('Provisional: '+msg.code); return; }
       if (msg.code===200) {
         const tf=msg.headers['to']||'';
         const tm=tf.match(/;tag=([^\s;]+)/);
         toTag=tm?tm[1]:''; toHeader=tf.split(';tag=')[0];
-        // tempo medido desde o 183 (já definido antes)
         clearTimeout(answerTimer); callAnswered=true;
-        log('ATENDIDA! Enviando ACK...');
+        log('ATENDIDA! Enviando ACK e BYE imediatamente...');
 
         // ACK
         const dn=CONFIG.destination.replace(/\D/g,'');
         const br=generateBranch();
-        ws.send('ACK sip:'+dn+'@'+CONFIG.host+' SIP/2.0\r\nVia: SIP/2.0/WSS '+CONFIG.host+';branch='+br+'\r\nMax-Forwards: 70\r\nFrom: <sip:'+CONFIG.user+'@'+CONFIG.host+'>;tag='+localTag+'\r\nTo: '+toHeader+(toTag?';tag='+toTag:'')+'\r\nCall-ID: '+callId+'\r\nCSeq: '+cseq+' ACK\r\nContent-Length: 0\r\n\r\n');
+        ws.send('ACK sip:'+dn+'@'+CONFIG.host+' SIP/2.0\r\n' +
+          'Via: SIP/2.0/WSS '+CONFIG.host+';branch='+br+'\r\n' +
+          'Max-Forwards: 70\r\n' +
+          'From: <sip:'+CONFIG.user+'@'+CONFIG.host+'>;tag='+localTag+'\r\n' +
+          'To: '+toHeader+(toTag?';tag='+toTag:'')+'\r\n' +
+          'Call-ID: '+callId+'\r\n' +
+          'CSeq: '+cseq+' ACK\r\n' +
+          'Content-Length: 0\r\n\r\n');
+
         state='answered';
 
-        output({ status: 'answered', callId, destination: CONFIG.destination });
-
-        // Transferir para Maria via REFER
-        log('Transferindo para Maria via REFER...');
+        // BYE imediato — liberar o ramal
         setTimeout(() => {
-          ws.send(buildREFER(toHeader, toTag, CONFIG.ramalMaria));
-        }, 500);
-
-        // Encerrar apos 10s
-        setTimeout(() => {
-          log('Encerrando apos transferencia...');
-          ws.close();
-          process.exit(0);
-        }, 10000);
+          log('Enviando BYE para liberar ramal...');
+          sendBYE();
+          // Retornar resultado e encerrar
+          setTimeout(() => {
+            output({ status: 'answered', callId, destination: CONFIG.destination });
+            ws.close();
+            process.exit(0);
+          }, 1000);
+        }, 300);
         return;
       }
       if (msg.code===401||msg.code===407) {
@@ -305,7 +281,6 @@ function onSIPMessage(raw) {
         let ah=prefix+': Digest username="'+CONFIG.user+'",realm="'+(a.realm||CONFIG.realm)+'",nonce="'+a.nonce+'",uri="sip:'+dn+'@'+CONFIG.host+'",response="'+resp+'"';
         if (a.qop) ah+=',qop=auth,nc='+nc+',cnonce="'+cn+'"';
         if (a.algorithm) ah+=',algorithm='+a.algorithm;
-        if (a.opaque) ah+=',opaque="'+a.opaque+'"';
         cseq++; branch=generateBranch();
         ws.send(buildINVITE(CONFIG.destination, buildSDP(), ah)); return;
       }
@@ -317,18 +292,7 @@ function onSIPMessage(raw) {
     }
     if (msg.type==='request'&&msg.method==='BYE') {
       clearTimeout(answerTimer);
-      return finish('no_answer', 'Cancelado pelo servidor');
-    }
-  }
-
-  if (state==='answered') {
-    if (msg.type==='request'&&msg.method==='BYE') { ws.close(); process.exit(0); }
-    // NOTIFY de sucesso do REFER
-    if (msg.type==='request'&&msg.method==='NOTIFY') {
-      log('NOTIFY recebido — transferencia em andamento');
-      // Responder 200 OK ao NOTIFY
-      const br=generateBranch();
-      ws.send('SIP/2.0 200 OK\r\nVia: '+msg.headers['via']+'\r\nFrom: '+msg.headers['from']+'\r\nTo: '+msg.headers['to']+'\r\nCall-ID: '+msg.headers['call-id']+'\r\nCSeq: '+msg.headers['cseq']+'\r\nContent-Length: 0\r\n\r\n');
+      return finish('no_answer', 'Cancelado');
     }
   }
 }
@@ -350,7 +314,7 @@ function finish(status, message) {
   process.exit(0);
 }
 
-log('Sofia v3 — ' + CONFIG.destination + ' | Maria: ' + CONFIG.ramalMaria);
+log('Sofia v4 — ' + CONFIG.destination);
 ws = new SIPWebSocket(CONFIG.host, CONFIG.port);
 ws.onopen    = () => { state='registering'; ws.send(buildREG()); };
 ws.onmessage = (msg) => onSIPMessage(msg);
